@@ -15,7 +15,7 @@ GUI_DST="/usr/share/pve-manager/js/pvemanagerlib.js"
 BACKUP_DIR="/var/backups/pve-hardware-sensors"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
-MARKER="PVE_HARDWARE_SENSORS_GUI_V4"
+MARKER="PVE_HARDWARE_SENSORS_GUI_V5"
 
 if [[ $EUID -ne 0 ]]; then
     echo "ERROR: installer must be run as root."
@@ -156,7 +156,57 @@ echo "[5/7] Installing Proxmox GUI patch..."
 if grep -q "$MARKER" "$GUI_DST"; then
     echo "      GUI patch already installed."
 else
+    if grep -q "PVE_HARDWARE_SENSORS_GUI_V" "$GUI_DST"; then
+        echo "      Older GUI patch detected. Removing it."
 
+        python3 - "$GUI_DST" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+
+marker_pos = text.find("PVE_HARDWARE_SENSORS_GUI_V")
+if marker_pos == -1:
+    raise SystemExit("ERROR: GUI marker not found.")
+
+# Find the beginning of the comment containing the GUI marker.
+comment_start = text.rfind("/*", 0, marker_pos)
+if comment_start == -1:
+    raise SystemExit("ERROR: GUI panel comment start not found.")
+
+start = text.find("{", marker_pos)
+if start == -1:
+    raise SystemExit("ERROR: GUI panel opening brace not found.")
+
+depth = 0
+end = None
+
+for i in range(start, len(text)):
+    if text[i] == "{":
+        depth += 1
+    elif text[i] == "}":
+        depth -= 1
+
+        if depth == 0:
+            end = i + 1
+            break
+
+if end is None:
+    raise SystemExit("ERROR: GUI panel closing brace not found.")
+
+if end >= len(text) or text[end:end + 1] != ",":
+    raise SystemExit("ERROR: GUI panel closing comma not found.")
+
+end += 1
+
+new_text = text[:comment_start] + text[end:]
+
+path.write_text(new_text)
+print("      Existing GUI patch removed safely.")
+PY
+    fi
     python3 - "$GUI_DST" "$GUI_SRC" <<'PY'
 import sys
 from pathlib import Path
