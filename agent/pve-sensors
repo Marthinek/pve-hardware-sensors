@@ -137,6 +137,7 @@ def find_gpu_temperature():
 
 def find_storage_temperatures():
     result = []
+    seen = set()
 
     storage_names = (
         "nvme",
@@ -170,6 +171,20 @@ def find_storage_temperatures():
 
                 if not temperature:
                     continue
+
+                # Some NVMe devices expose the same physical temperature
+                # through multiple names, for example "Composite" and
+                # "Sensor 2". Keep only one identical reading from the
+                # same sensor chip.
+                dedup_key = (
+                    chip_name,
+                    round(temperature["value"], 3),
+                )
+
+                if dedup_key in seen:
+                    continue
+
+                seen.add(dedup_key)
 
                 result.append({
                     "type": "storage",
