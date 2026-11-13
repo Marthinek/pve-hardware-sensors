@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Proxmox Hardware Sensors Agent
-# Initial universal detector
+# Universal hardware sensor detection
 
 SENSORS_JSON="$(sensors -j 2>/dev/null || echo '{}')"
 
@@ -10,7 +10,6 @@ python3 - "$SENSORS_JSON" <<'PY'
 import json
 import sys
 import glob
-import os
 
 try:
     data = json.loads(sys.argv[1])
@@ -20,174 +19,165 @@ except Exception:
 def is_number(value):
     return isinstance(value, (int, float)) and value == value
 
-def find_temp(sensor_names):
-    """
-    Find the first useful temperature from a preferred list
-    of sensor/chip names.
-    """
-    for chip_name, chip in data.items():
-        if not isinstance(chip, dict):
-            continue
+def temp_result(chip_name, sensor_name, values, input_key):
+    value = values.get(input_key)
 
-        chip_lower = chip_name.lower()
+    if not is_number(value):
+        return None
 
-        if not any(name in chip_lower for name in sensor_names):
-            continue
+    result = {
+        "value": value,
+        "sensor": sensor_name,
+        "chip": chip_name,
+    }
 
-        for label, values in chip.items():
-            if not isinstance(values, dict):
-                continue
+    suffix = input_key[:-6]  # remove "_input"
 
-            value = values.get("temp1_input")
+    max_value = values.get(suffix + "_max")
+    crit_value = values.get(suffix + "_crit")
 
-            if is_number(value):
-                result = {
-                    "value": value,
-                    "sensor": label,
-                }
+    if is_number(max_value):
+        result["high"] = max_value
 
-                if is_number(values.get("temp1_max")):
-                    result["high"] = values["temp1_max"]
+    if is_number(crit_value):
+        result["critical"] = crit_value
 
-                if is_number(values.get("temp1_crit")):
-                    result["critical"] = values["temp1_crit"]
-
-                return result
-
-    return None
+    return result
 
 def find_cpu_temperature():
-    # Intel
+    # Intel coretemp
     for chip_name, chip in data.items():
         if "coretemp" not in chip_name.lower():
             continue
 
-        for label, values in chip.items():
+        for sensor_name, values in chip.items():
             if not isinstance(values, dict):
                 continue
 
-            if label.lower().startswith("package"):
-                value = values.get("temp1_input")
-                if is_number(value):
-                    result = {
-                        "value": value,
-                        "sensor": label,
-                    }
+            if sensor_name.lower().startswith("package"):
+                result = temp_result(
+                    chip_name,
+                    sensor_name,
+                    values,
+                    "temp1_input"
+                )
 
-                    if is_number(values.get("temp1_max")):
-                        result["high"] = values["temp1_max"]
-
-                    if is_number(values.get("temp1_crit")):
-                        result["critical"] = values["temp1_crit"]
-
+                if result:
                     return result
 
-    # AMD
+    # AMD k10temp / zenpower
     for chip_name, chip in data.items():
         chip_lower = chip_name.lower()
 
         if not any(x in chip_lower for x in ("k10temp", "zenpower")):
             continue
 
-        preferred = []
+        candidates = []
 
-        for label, values in chip.items():
+        for sensor_name, values in chip.items():
             if not isinstance(values, dict):
                 continue
 
-            label_lower = label.lower()
+            priority = 10
 
-            if label_lower in ("tctl", "tdie"):
-                preferred.append((0, label, values))
-            else:
-                preferred.append((1, label, values))
+            if sensor_name.lower() == "tctl":
+                priority = 0
+            elif sensor_name.lower() == "tdie":
+                priority = 1
 
-        for _, label, values in sorted(preferred):
-            value = values.get("temp1_input")
+            candidates.append((priority, sensor_name, values))
 
-            if is_number(value):
-                result = {
-                    "value": value,
-                    "sensor": label,
-                }
+        for _, sensor_name, values in sorted(candidates):
+            result = temp_result(
+                chip_name,
+                sensor_name,
+                values,
+                "temp1_input"
+            )
 
-                if is_number(values.get("temp1_max")):
-                    result["high"] = values["temp1_max"]
-
-                if is_number(values.get("temp1_crit")):
-                    result["critical"] = values["temp1_crit"]
-
+            if result:
                 return result
 
-    return find_temp(("coretemp", "k10temp", "zenpower"))
-
-def find_nvme_temperatures():
-    result = []
-
-    for chip_name, chip in data.items():
-        chip_lower = chip_name.lower()
-
-        if "nvme" not in chip_lower:
-            continue
-
-        for label, values in chip.items():
-            if not isinstance(values, dict):
-                continue
-
-            value = values.get("temp1_input")
-
-            if not is_number(value):
-                continue
-
-            entry = {
-                "type": "nvme",
-                "name": "NVMe",
-                "temperature": {
-                    "value": value,
-                    "sensor": label,
-                },
-            }
-
-            if is_number(values.get("temp1_max")):
-                entry["temperature"]["high"] = values["temp1_max"]
-
-            if is_number(values.get("temp1_crit")):
-                entry["temperature"]["critical"] = values["temp1_crit"]
-
-            result.append(entry)
-
-    return result
+    return None
 
 def find_gpu_temperature():
+    gpu_names = (
+        "amdgpu",
+        "radeon",
+        "nouveau",
+        "i915",
+        "xe",
+    )
+
     for chip_name, chip in data.items():
         chip_lower = chip_name.lower()
 
-        if not any(x in chip_lower for x in ("amdgpu", "radeon", "nouveau")):
+        if not any(name in chip_lower for name in gpu_names):
             continue
 
-        for label, values in chip.items():
+        for sensor_name, values in chip.items():
             if not isinstance(values, dict):
                 continue
 
-            for key, value in values.items():
-                if key.endswith("_input") and "temp" in key and is_number(value):
-                    result = {
-                        "value": value,
-                        "sensor": label,
-                    }
+            for key in values:
+                if not key.startswith("temp") or not key.endswith("_input"):
+                    continue
 
-                    max_value = values.get(key.replace("_input", "_max"))
-                    crit_value = values.get(key.replace("_input", "_crit"))
+                result = temp_result(
+                    chip_name,
+                    sensor_name,
+                    values,
+                    key
+                )
 
-                    if is_number(max_value):
-                        result["high"] = max_value
-
-                    if is_number(crit_value):
-                        result["critical"] = crit_value
-
+                if result:
                     return result
 
     return None
+
+def find_storage_temperatures():
+    result = []
+
+    storage_names = (
+        "nvme",
+        "drivetemp",
+        "ata",
+        "smart",
+        "hdd",
+        "ssd",
+    )
+
+    for chip_name, chip in data.items():
+        chip_lower = chip_name.lower()
+
+        if not any(name in chip_lower for name in storage_names):
+            continue
+
+        for sensor_name, values in chip.items():
+            if not isinstance(values, dict):
+                continue
+
+            for key in values:
+                if not key.startswith("temp") or not key.endswith("_input"):
+                    continue
+
+                temperature = temp_result(
+                    chip_name,
+                    sensor_name,
+                    values,
+                    key
+                )
+
+                if not temperature:
+                    continue
+
+                result.append({
+                    "type": "storage",
+                    "name": sensor_name,
+                    "temperature": temperature,
+                })
+
+    return result
 
 def cpu_frequency():
     paths = glob.glob(
@@ -206,7 +196,6 @@ def cpu_frequency():
     if not values:
         return None
 
-    # Average frequency of all available CPUs, converted kHz -> GHz.
     return round(sum(values) / len(values) / 1000000, 3)
 
 def cpu_load():
@@ -234,10 +223,11 @@ output = {
     "version": 1,
     "cpu": cpu,
     "gpu": [],
-    "storage": find_nvme_temperatures(),
+    "storage": find_storage_temperatures(),
 }
 
 gpu = find_gpu_temperature()
+
 if gpu:
     output["gpu"].append({
         "type": "gpu",
