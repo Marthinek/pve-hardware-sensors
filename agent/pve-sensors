@@ -162,6 +162,45 @@ def find_gpu_temperature():
     return None
 
 
+def get_nvme_identity(chip_name):
+    """
+    Get NVMe model and namespace device from sysfs.
+    """
+    chip_lower = chip_name.lower()
+
+    if "nvme" not in chip_lower:
+        return None
+
+    for nvme_path in sorted(
+        glob.glob("/sys/class/nvme/nvme*")
+    ):
+        model_path = f"{nvme_path}/model"
+
+        try:
+            with open(model_path, "r") as handle:
+                model = handle.read().strip()
+        except OSError:
+            model = ""
+
+        namespaces = sorted(
+            glob.glob(f"{nvme_path}/nvme*n*")
+        )
+
+        if not namespaces:
+            continue
+
+        device = f"/dev/{namespaces[0].split('/')[-1]}"
+
+        return {
+            "name": namespaces[0].split("/")[-1],
+            "model": model,
+            "device": device,
+        }
+
+    return None
+
+
+
 def find_storage_temperatures():
     """
     Find storage temperatures exposed by lm-sensors.
@@ -224,11 +263,24 @@ def find_storage_temperatures():
 
                 seen.add(dedup_key)
 
-                result.append({
-                    "type": "storage",
-                    "name": sensor_name,
-                    "temperature": temperature,
-                })
+                nvme = get_nvme_identity(chip_name)
+
+                if nvme:
+                    result.append({
+                        "type": "storage",
+                        "name": nvme["name"],
+                        "model": nvme["model"],
+                        "temperature": {
+                            **temperature,
+                            "device": nvme["device"],
+                        },
+                    })
+                else:
+                    result.append({
+                        "type": "storage",
+                        "name": sensor_name,
+                        "temperature": temperature,
+                    })
 
     return result
 

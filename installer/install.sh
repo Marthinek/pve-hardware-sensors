@@ -15,7 +15,7 @@ GUI_DST="/usr/share/pve-manager/js/pvemanagerlib.js"
 BACKUP_DIR="/var/backups/pve-hardware-sensors"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 
-MARKER="PVE_HARDWARE_SENSORS_GUI_V5"
+MARKER="PVE_HARDWARE_SENSORS_GUI_V6"
 
 if [[ $EUID -ne 0 ]]; then
     echo "ERROR: installer must be run as root."

@@ -1,136 +1,270 @@
 /*
- * PVE_HARDWARE_SENSORS_GUI_V5
+ * PVE_HARDWARE_SENSORS_GUI_V6
  */
 
 {
     xtype: 'panel',
     title: gettext('Hardware Sensors'),
-    bodyPadding: 10,
+    bodyPadding: 8,
 
-    html: '<div style="padding:20px;">Loading hardware sensors...</div>',
+    html: '<div style="padding:12px;">Loading hardware sensors...</div>',
 
     listeners: {
         afterrender: function (panel) {
+
+            function temperatureColor(value, high, critical) {
+                if (!Ext.isNumeric(value)) {
+                    return '';
+                }
+
+                if (Ext.isNumeric(critical) && value >= critical) {
+                    return '#f44336';
+                }
+
+                if (Ext.isNumeric(high) && value >= high) {
+                    return '#ff9800';
+                }
+
+                return '#8bc34a';
+            }
+
+            function temperatureHtml(temperature) {
+                if (!temperature || !Ext.isNumeric(temperature.value)) {
+                    return '<span style="color:#999;">N/A</span>';
+                }
+
+                let color = temperatureColor(
+                    temperature.value,
+                    temperature.high,
+                    temperature.critical
+                );
+
+                return `
+                    <span style="
+                        color:${color};
+                        font-size:18px;
+                        font-weight:600;
+                    ">
+                        ${Number(temperature.value).toFixed(1)} °C
+                    </span>
+                `;
+            }
+
             function updateSensors() {
                 Proxmox.Utils.API2Request({
-                url: '/nodes/' + nodename + '/sensors',
-                method: 'GET',
+                    url: '/nodes/' + nodename + '/sensors',
+                    method: 'GET',
 
-                success: function (response) {
-                    let data = response.result.data;
-                    let html = '';
+                    success: function (response) {
+                        let data = response.result.data || {};
+                        let cpu = data.cpu || {};
 
-                    // CPU
-                    let cpu = data.cpu || {};
-                    let cpuTemp = cpu.temperature?.value;
-                    let cpuFreq = cpu.frequency;
-                    let cpuLoad = cpu.load;
+                        let cpuTemp = cpu.temperature;
+                        let cpuFreq = cpu.frequency;
+                        let cpuLoad = cpu.load;
 
-                    html += `
-                        <div style="margin-bottom:20px;">
-                            <h3 style="margin-bottom:10px;">CPU</h3>
-                            <div>
-                                Temperature:
-                                <strong>
-                                    ${Ext.isNumeric(cpuTemp) ? Number(cpuTemp).toFixed(1) + ' °C' : 'N/A'}
-                                </strong>
-                            </div>
-                            <div>
-                                Frequency:
-                                <strong>
-                                    ${Ext.isNumeric(cpuFreq) ? Number(cpuFreq).toFixed(2) + ' GHz' : 'N/A'}
-                                </strong>
-                            </div>
-                            <div>
-                                Load:
-                                <strong>
-                                    ${Ext.isNumeric(cpuLoad) ? (Number(cpuLoad) * 100).toFixed(1) + ' %' : 'N/A'}
-                                </strong>
-                            </div>
-                        </div>
-                    `;
+                        let html = `
+                            <div style="
+                                padding:8px 10px 12px 10px;
+                                font-size:13px;
+                            ">
 
-                    // GPU
-                    html += `
-                        <div style="margin-bottom:20px;">
-                            <h3 style="margin-bottom:10px;">GPU</h3>
-                    `;
+                                <!-- CPU / GPU summary -->
+                                <div style="
+                                    display:grid;
+                                    grid-template-columns:1fr 1fr;
+                                    gap:10px;
+                                    margin-bottom:14px;
+                                ">
 
-                    if (Array.isArray(data.gpu) && data.gpu.length > 0) {
-                        data.gpu.forEach(function (gpu) {
-                            let gpuTemp = gpu.temperature?.value;
+                                    <div style="
+                                        border:1px solid #444;
+                                        border-radius:4px;
+                                        padding:12px;
+                                    ">
+                                        <div style="
+                                            color:#bbb;
+                                            font-size:13px;
+                                            font-weight:600;
+                                            margin-bottom:10px;
+                                        ">
+                                            CPU
+                                        </div>
 
+                                        <div style="margin-bottom:7px;">
+                                            <span style="color:#999;">Temperature</span>
+                                            <span style="float:right;">
+                                                ${temperatureHtml(cpuTemp)}
+                                            </span>
+                                        </div>
+
+                                        <div style="margin-bottom:7px;">
+                                            <span style="color:#999;">Frequency</span>
+                                            <span style="
+                                                float:right;
+                                                font-size:16px;
+                                                font-weight:600;
+                                            ">
+                                                ${
+                                                    Ext.isNumeric(cpuFreq)
+                                                        ? Number(cpuFreq).toFixed(2) + ' GHz'
+                                                        : 'N/A'
+                                                }
+                                            </span>
+                                        </div>
+
+                                        <div>
+                                            <span style="color:#999;">Load</span>
+                                            <span style="
+                                                float:right;
+                                                font-size:16px;
+                                                font-weight:600;
+                                            ">
+                                                ${
+                                                    Ext.isNumeric(cpuLoad)
+                                                        ? (Number(cpuLoad) * 100).toFixed(0) + ' %'
+                                                        : 'N/A'
+                                                }
+                                            </span>
+                                        </div>
+                                    </div>
+
+                                    <div style="
+                                        border:1px solid #444;
+                                        border-radius:4px;
+                                        padding:12px;
+                                    ">
+                                        <div style="
+                                            color:#bbb;
+                                            font-size:13px;
+                                            font-weight:600;
+                                            margin-bottom:10px;
+                                        ">
+                                            GPU / APU
+                                        </div>
+                        `;
+
+                        if (Array.isArray(data.gpu) && data.gpu.length > 0) {
+                            data.gpu.forEach(function (gpu) {
+                                let gpuTemp = gpu.temperature;
+
+                                html += `
+                                    <div style="margin-bottom:8px;">
+                                        <div style="
+                                            color:#999;
+                                            margin-bottom:3px;
+                                        ">
+                                            ${gpu.name || 'GPU'}
+                                        </div>
+
+                                        ${temperatureHtml(gpuTemp)}
+                                    </div>
+                                `;
+                            });
+                        } else {
                             html += `
-                                <div style="margin-bottom:8px;">
-                                    <strong>${gpu.name || 'GPU'}</strong><br>
-                                    Temperature:
-                                    ${Ext.isNumeric(gpuTemp) ? Number(gpuTemp).toFixed(1) + ' °C' : 'N/A'}
+                                <div style="
+                                    color:#888;
+                                    padding-top:6px;
+                                ">
+                                    No GPU sensor detected
                                 </div>
                             `;
-                        });
-                    } else {
-                        html += '<div>No GPU sensors detected.</div>';
-                    }
+                        }
 
-                    html += '</div>';
+                        html += `
+                                    </div>
+                                </div>
 
-                    // Storage
-                    html += `
-                        <div>
-                            <h3 style="margin-bottom:10px;">Storage</h3>
-                    `;
+                                <!-- Storage -->
+                                <div style="
+                                    color:#bbb;
+                                    font-size:13px;
+                                    font-weight:600;
+                                    margin:4px 0 8px 2px;
+                                ">
+                                    Storage temperatures
+                                </div>
+                        `;
 
-                    if (Array.isArray(data.storage) && data.storage.length > 0) {
-                        data.storage.forEach(function (disk) {
-                            let diskTemp = disk.temperature?.value;
+                        if (Array.isArray(data.storage) && data.storage.length > 0) {
+                            data.storage.forEach(function (disk) {
+                                let diskTemp = disk.temperature;
 
+                                html += `
+                                    <div style="
+                                        border:1px solid #444;
+                                        border-radius:4px;
+                                        padding:9px 12px;
+                                        margin-bottom:7px;
+                                    ">
+                                        <div style="
+                                            display:flex;
+                                            align-items:center;
+                                            justify-content:space-between;
+                                        ">
+                                            <div>
+                                                <div style="
+                                                    font-weight:600;
+                                                    font-size:14px;
+                                                    margin-bottom:2px;
+                                                ">
+                                                    💾 ${disk.name || 'Storage'}
+                                                </div>
+
+                                                <div style="
+                                                    color:#888;
+                                                    font-size:11px;
+                                                ">
+                                                    ${disk.model || ''}
+                                                </div>
+                                            </div>
+
+                                            <div>
+                                                ${temperatureHtml(diskTemp)}
+                                            </div>
+                                        </div>
+                                    </div>
+                                `;
+                            });
+                        } else {
                             html += `
-                                <div style="margin-bottom:8px;">
-                                    <strong>${disk.name || 'Storage'}</strong>
-                                    ${disk.model ? ' - ' + disk.model : ''}
-                                    <br>
-                                    Temperature:
-                                    ${Ext.isNumeric(diskTemp) ? Number(diskTemp).toFixed(1) + ' °C' : 'N/A'}
+                                <div style="
+                                    color:#888;
+                                    padding:8px 2px;
+                                ">
+                                    No storage temperature sensors detected
                                 </div>
                             `;
-                        });
-                    } else {
-                        html += '<div>No storage sensors detected.</div>';
+                        }
+
+                        html += `
+                            </div>
+                        `;
+
+                        panel.update(html);
+                    },
+
+                    failure: function () {
+                        panel.update(`
+                            <div style="
+                                padding:20px;
+                                color:#f44336;
+                            ">
+                                Unable to read hardware sensors
+                            </div>
+                        `);
+                    },
+                });
+
+                panel.sensorRefreshTask = Ext.defer(function () {
+                    if (!panel.destroyed) {
+                        updateSensors();
                     }
-
-                    html += '</div>';
-
-                    panel.update(`
-                        <div style="
-                            padding:20px;
-                            font-size:16px;
-                        ">
-                            ${html}
-                        </div>
-                    `);
-                },
-
-                failure: function () {
-                    panel.update(`
-                        <div style="
-                            padding:20px;
-                            color:#f44336;
-                        ">
-                            Unable to read hardware sensors
-                        </div>
-                    `);
-                },
-            });
-
-            panel.sensorRefreshTask = Ext.defer(function () {
-                if (!panel.destroyed) {
-                    updateSensors();
-                }
-            }, 5000);
+                }, 5000);
             }
 
             updateSensors();
-
         },
     },
 },
