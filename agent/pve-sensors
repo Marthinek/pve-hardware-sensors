@@ -3,6 +3,12 @@ set -euo pipefail
 
 # Proxmox Hardware Sensors Agent
 # Universal hardware sensor detection
+#
+# Data sources:
+#   - lm-sensors / sensors -j
+#   - CPU cpufreq sysfs
+#   - /proc/loadavg
+#   - smartctl for physical storage devices
 
 SENSORS_JSON="$(sensors -j 2>/dev/null || echo '{}')"
 
@@ -10,14 +16,19 @@ python3 - "$SENSORS_JSON" <<'PY'
 import json
 import sys
 import glob
+import subprocess
+import re
+
 
 try:
     data = json.loads(sys.argv[1])
 except Exception:
     data = {}
 
+
 def is_number(value):
     return isinstance(value, (int, float)) and value == value
+
 
 def temp_result(chip_name, sensor_name, values, input_key):
     value = values.get(input_key)
@@ -31,7 +42,7 @@ def temp_result(chip_name, sensor_name, values, input_key):
         "chip": chip_name,
     }
 
-    suffix = input_key[:-6]  # remove "_input"
+    suffix = input_key[:-6]
 
     max_value = values.get(suffix + "_max")
     crit_value = values.get(suffix + "_crit")
@@ -44,8 +55,11 @@ def temp_result(chip_name, sensor_name, values, input_key):
 
     return result
 
+
 def find_cpu_temperature():
+    # ------------------------------------------------------------
     # Intel coretemp
+    # ------------------------------------------------------------
     for chip_name, chip in data.items():
         if "coretemp" not in chip_name.lower():
             continue
@@ -59,17 +73,22 @@ def find_cpu_temperature():
                     chip_name,
                     sensor_name,
                     values,
-                    "temp1_input"
+                    "temp1_input",
                 )
 
                 if result:
                     return result
 
+    # ------------------------------------------------------------
     # AMD k10temp / zenpower
+    # ------------------------------------------------------------
     for chip_name, chip in data.items():
         chip_lower = chip_name.lower()
 
-        if not any(x in chip_lower for x in ("k10temp", "zenpower")):
+        if not any(
+            name in chip_lower
+            for name in ("k10temp", "zenpower")
+        ):
             continue
 
         candidates = []
@@ -85,20 +104,23 @@ def find_cpu_temperature():
             elif sensor_name.lower() == "tdie":
                 priority = 1
 
-            candidates.append((priority, sensor_name, values))
+            candidates.append(
+                (priority, sensor_name, values)
+            )
 
         for _, sensor_name, values in sorted(candidates):
             result = temp_result(
                 chip_name,
                 sensor_name,
                 values,
-                "temp1_input"
+                "temp1_input",
             )
 
             if result:
                 return result
 
     return None
+
 
 def find_gpu_temperature():
     gpu_names = (
@@ -112,7 +134,10 @@ def find_gpu_temperature():
     for chip_name, chip in data.items():
         chip_lower = chip_name.lower()
 
-        if not any(name in chip_lower for name in gpu_names):
+        if not any(
+            name in chip_lower
+            for name in gpu_names
+        ):
             continue
 
         for sensor_name, values in chip.items():
@@ -120,22 +145,28 @@ def find_gpu_temperature():
                 continue
 
             for key in values:
-                if not key.startswith("temp") or not key.endswith("_input"):
-                    continue
+                if (
+                    key.startswith("temp")
+                    and key.endswith("_input")
+                ):
+                    result = temp_result(
+                        chip_name,
+                        sensor_name,
+                        values,
+                        key,
+                    )
 
-                result = temp_result(
-                    chip_name,
-                    sensor_name,
-                    values,
-                    key
-                )
-
-                if result:
-                    return result
+                    if result:
+                        return result
 
     return None
 
+
 def find_storage_temperatures():
+    """
+    Find storage temperatures exposed by lm-sensors.
+    """
+
     result = []
     seen = set()
 
@@ -151,7 +182,10 @@ def find_storage_temperatures():
     for chip_name, chip in data.items():
         chip_lower = chip_name.lower()
 
-        if not any(name in chip_lower for name in storage_names):
+        if not any(
+            name in chip_lower
+            for name in storage_names
+        ):
             continue
 
         for sensor_name, values in chip.items():
@@ -159,26 +193,30 @@ def find_storage_temperatures():
                 continue
 
             for key in values:
-                if not key.startswith("temp") or not key.endswith("_input"):
+                if (
+                    not key.startswith("temp")
+                    or not key.endswith("_input")
+                ):
                     continue
 
                 temperature = temp_result(
                     chip_name,
                     sensor_name,
                     values,
-                    key
+                    key,
                 )
 
                 if not temperature:
                     continue
 
-                # Some NVMe devices expose the same physical temperature
-                # through multiple names, for example "Composite" and
-                # "Sensor 2". Keep only one identical reading from the
-                # same sensor chip.
+                # Avoid duplicate readings such as:
+                # Composite / Sensor 2 on NVMe.
                 dedup_key = (
                     chip_name,
-                    round(temperature["value"], 3),
+                    round(
+                        temperature["value"],
+                        3,
+                    ),
                 )
 
                 if dedup_key in seen:
@@ -194,7 +232,350 @@ def find_storage_temperatures():
 
     return result
 
+
+def get_block_devices():
+    """
+    Get physical disks from lsblk.
+    """
+
+    devices = []
+
+    try:
+        output = subprocess.check_output(
+            [
+                "lsblk",
+                "-dn",
+                "-o",
+                "NAME,TYPE",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except Exception:
+        return devices
+
+    for line in output.splitlines():
+        parts = line.split()
+
+        if len(parts) != 2:
+            continue
+
+        name, device_type = parts
+
+        if device_type != "disk":
+            continue
+
+        devices.append("/dev/" + name)
+
+    return devices
+
+
+def get_smart_device_type(device):
+    """
+    Ask smartctl which device type should be used.
+
+    Example:
+        /dev/sda -d sat
+    """
+
+    try:
+        result = subprocess.run(
+            [
+                "smartctl",
+                "--scan-open",
+            ],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except Exception:
+        return None
+
+    for line in result.stdout.splitlines():
+        fields = line.split()
+
+        if not fields:
+            continue
+
+        if fields[0] != device:
+            continue
+
+        for index, field in enumerate(fields):
+            if (
+                field == "-d"
+                and index + 1 < len(fields)
+            ):
+                return fields[index + 1]
+
+    return None
+
+
+def parse_smart_temperature(output):
+    """
+    Parse ATA/SATA SMART temperature attributes.
+
+    Typical line:
+
+    194 Temperature_Celsius
+        0x0023   067   067   000
+        Pre-fail Always - 33 (Min/Max 33/33)
+
+    We specifically take the RAW_VALUE at the end,
+    not VALUE/WORST/THRESH or the hexadecimal flag.
+    """
+
+    temperature_names = (
+        "Temperature_Celsius",
+        "Airflow_Temperature_Cel",
+        "Temperature_Internal",
+        "Current_Temperature",
+    )
+
+    for line in output.splitlines():
+
+        stripped = line.strip()
+
+        attribute = None
+
+        for name in temperature_names:
+            # SMART attribute lines normally start with an ID:
+            #
+            #   194 Temperature_Celsius ...
+            #
+            # so the attribute name is not necessarily at the
+            # beginning of the line.
+            if re.search(
+                rf"\b{re.escape(name)}\b",
+                stripped,
+                re.IGNORECASE,
+            ):
+                attribute = name
+                break
+
+        if attribute is None:
+            continue
+
+        # Look after the "Always -" part.
+        # This avoids accidentally reading:
+        # 0x0023, 067, 067, 000
+        match = re.search(
+            r"\bAlways\s+-\s+([-+]?[0-9]+(?:\.[0-9]+)?)",
+            stripped,
+            re.IGNORECASE,
+        )
+
+        if match:
+            try:
+                return {
+                    "value": float(match.group(1)),
+                    "sensor": attribute,
+                }
+            except Exception:
+                pass
+
+        # Fallback for SMART implementations that don't
+        # contain the standard "Always -" layout.
+        #
+        # Take numeric values at the end of the line,
+        # ignoring hexadecimal fields.
+        fields = stripped.split()
+
+        numeric_values = []
+
+        for field in fields:
+
+            if field.lower().startswith("0x"):
+                continue
+
+            if re.fullmatch(
+                r"[-+]?[0-9]+(?:\.[0-9]+)?",
+                field,
+            ):
+                try:
+                    numeric_values.append(
+                        float(field)
+                    )
+                except Exception:
+                    pass
+
+        if numeric_values:
+            # Last numeric value is normally RAW_VALUE.
+            return {
+                "value": numeric_values[-1],
+                "sensor": attribute,
+            }
+
+    return None
+
+
+def get_smart_temperature(device):
+    """
+    Read temperature and model from smartctl.
+    """
+
+    device_type = get_smart_device_type(device)
+
+    command = [
+        "smartctl",
+        "-A",
+    ]
+
+    if device_type:
+        command.extend([
+            "-d",
+            device_type,
+        ])
+
+    command.append(device)
+
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except Exception:
+        return None
+
+    output = result.stdout
+
+    temperature = parse_smart_temperature(
+        output
+    )
+
+    if not temperature:
+        return None
+
+    # Model is available in smartctl -i, not necessarily in -A.
+    info_command = [
+        "smartctl",
+        "-i",
+    ]
+
+    if device_type:
+        info_command.extend([
+            "-d",
+            device_type,
+        ])
+
+    info_command.append(device)
+
+    model = None
+
+    try:
+        info_result = subprocess.run(
+            info_command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+
+        for line in info_result.stdout.splitlines():
+            stripped = line.strip()
+
+            if stripped.startswith("Device Model:"):
+                model = stripped.split(
+                    ":",
+                    1,
+                )[1].strip()
+                break
+
+            if stripped.startswith("Model Number:"):
+                model = stripped.split(
+                    ":",
+                    1,
+                )[1].strip()
+                break
+
+        if model is None:
+            for line in info_result.stdout.splitlines():
+                stripped = line.strip()
+
+                if stripped.startswith("Model Family:"):
+                    model = stripped.split(
+                        ":",
+                        1,
+                    )[1].strip()
+                    break
+
+    except Exception:
+        pass
+
+    return {
+        "value": temperature["value"],
+        "sensor": temperature["sensor"],
+        "device": device,
+        "model": model,
+    }
+
+def find_smart_temperatures(existing):
+    """
+    SMART fallback for disks which are not already
+    exposed through lm-sensors.
+    """
+
+    result = []
+
+    # Devices already represented by lm-sensors.
+    existing_nvme = False
+
+    for item in existing:
+        temperature = item.get(
+            "temperature",
+            {},
+        )
+
+        chip = temperature.get(
+            "chip",
+            "",
+        )
+
+        if "nvme" in chip.lower():
+            existing_nvme = True
+
+    for device in get_block_devices():
+
+        # NVMe temperature is already handled by lm-sensors.
+        if (
+            "/dev/nvme" in device
+            and existing_nvme
+        ):
+            continue
+
+
+        temperature = get_smart_temperature(
+            device
+        )
+
+        if not temperature:
+            continue
+
+        name = device.split("/")[-1]
+
+        result.append({
+            "type": "storage",
+            "name": name,
+            "model": temperature["model"],
+            "temperature": {
+                "value": temperature["value"],
+                "sensor": temperature["sensor"],
+                "device": device,
+            },
+        })
+
+    return result
+
+
 def cpu_frequency():
+    """
+    Average CPU frequency in GHz.
+    """
+
     paths = glob.glob(
         "/sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_cur_freq"
     )
@@ -204,42 +585,88 @@ def cpu_frequency():
     for path in paths:
         try:
             with open(path) as f:
-                values.append(int(f.read().strip()))
+                values.append(
+                    int(
+                        f.read().strip()
+                    )
+                )
         except Exception:
             pass
 
     if not values:
         return None
 
-    return round(sum(values) / len(values) / 1000000, 3)
+    return round(
+        sum(values)
+        / len(values)
+        / 1000000,
+        3,
+    )
+
 
 def cpu_load():
+    """
+    First value from /proc/loadavg.
+    """
+
     try:
         with open("/proc/loadavg") as f:
-            return float(f.read().split()[0])
+            return float(
+                f.read().split()[0]
+            )
     except Exception:
         return None
+
+
+# ============================================================
+# CPU
+# ============================================================
 
 cpu = {}
 
 temperature = find_cpu_temperature()
+
 if temperature:
     cpu["temperature"] = temperature
 
 frequency = cpu_frequency()
+
 if frequency is not None:
     cpu["frequency"] = frequency
 
 load = cpu_load()
+
 if load is not None:
     cpu["load"] = load
+
+
+# ============================================================
+# STORAGE
+# ============================================================
+
+storage = find_storage_temperatures()
+
+storage.extend(
+    find_smart_temperatures(
+        storage
+    )
+)
+
+# ============================================================
+# OUTPUT
+# ============================================================
 
 output = {
     "version": 1,
     "cpu": cpu,
     "gpu": [],
-    "storage": find_storage_temperatures(),
+    "storage": storage,
 }
+
+
+# ============================================================
+# GPU
+# ============================================================
 
 gpu = find_gpu_temperature()
 
@@ -249,5 +676,12 @@ if gpu:
         "temperature": gpu,
     })
 
-print(json.dumps(output, indent=2))
+
+print(
+    json.dumps(
+        output,
+        indent=2,
+    )
+)
 PY
+
